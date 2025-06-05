@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from TextCompletion import TextCompletion
 
 class ImageRepair:
     def __init__(self):
@@ -14,6 +15,11 @@ class ImageRepair:
         self.min_distance = 2  # 最小绘制距离
         self.current_mask = None  # 当前正在绘制的掩码
         self.final_mask = None  # 最终确认的掩码
+        self.text_completion = TextCompletion()
+        self.text_regions = []  # 存储文字区域信息
+        self.adjusting_text = False  # 是否正在调整文字区域
+        self.current_text_region = None  # 当前正在调整的文字区域
+        self.text_region_start = None  # 文字区域起始点
 
     def create_mask(self, image_shape):
         """创建掩码"""
@@ -22,18 +28,28 @@ class ImageRepair:
     def update_display(self):
         """更新显示"""
         if self.original_image is not None:
+            temp = self.original_image.copy()
+            
+            # 显示修复效果
+            if self.final_mask is not None:
+                # 先进行图像修复
+                repaired = cv2.inpaint(self.original_image, self.final_mask, 3, cv2.INPAINT_TELEA)
+                temp = repaired.copy()
+            
+            # 显示当前绘制区域
             if self.drawing and self.current_mask is not None:
-                # 绘制时显示红色标记
-                temp = self.original_image.copy()
-                temp[self.current_mask > 0] = [0, 0, 255]  # 用红色标记当前绘制区域
-                if self.final_mask is not None:
-                    # 显示已确认的修复效果
-                    temp[self.final_mask > 0] = cv2.inpaint(self.original_image, self.final_mask, 3, cv2.INPAINT_TELEA)[self.final_mask > 0]
-            else:
-                # 非绘制状态显示修复效果
-                temp = self.original_image.copy()
-                if self.final_mask is not None:
-                    temp[self.final_mask > 0] = cv2.inpaint(self.original_image, self.final_mask, 3, cv2.INPAINT_TELEA)[self.final_mask > 0]
+                temp[self.current_mask > 0] = [0, 0, 255]  # 红色
+            
+            # 显示文字区域
+            for region in self.text_regions:
+                x, y, w, h = region
+                cv2.rectangle(temp, (x, y), (x + w, y + h), (0, 255, 0), 2)  # 绿色框
+            
+            # 显示正在调整的文字区域
+            if self.adjusting_text and self.text_region_start is not None:
+                x, y = self.text_region_start
+                cv2.rectangle(temp, (x, y), (self.last_x, self.last_y), (255, 0, 0), 2)  # 蓝色框
+            
             cv2.imshow(self.window_name, temp)
 
     def draw_line(self, x1, y1, x2, y2):
@@ -47,7 +63,28 @@ class ImageRepair:
         cv2.line(self.current_mask, (x1, y1), (x2, y2), 255, self.brush_size, cv2.LINE_AA)
 
     def mouse_callback(self, event, x, y, flags, param):
-        """鼠标回调函数，用于绘制掩码"""
+        """鼠标回调函数，用于绘制掩码或文本区域"""
+        if self.adjusting_text:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self.text_region_start = (x, y)
+            elif event == cv2.EVENT_MOUSEMOVE and self.text_region_start is not None:
+                self.last_x, self.last_y = x, y
+                self.update_display()
+            elif event == cv2.EVENT_LBUTTONUP:
+                if self.text_region_start is not None:
+                    x1, y1 = self.text_region_start
+                    x2, y2 = x, y
+                    # 确保坐标是有序的
+                    x = min(x1, x2)
+                    y = min(y1, y2)
+                    w = abs(x2 - x1)
+                    h = abs(y2 - y1)
+                    self.text_regions.append((x, y, w, h))
+                    self.text_region_start = None
+                    self.update_display()
+                    self.adjusting_text = False  # 新增，松开鼠标后退出调整模式
+            return
+
         if event == cv2.EVENT_LBUTTONDOWN:
             self.drawing = True
             self.last_x, self.last_y = x, y
@@ -85,83 +122,113 @@ class ImageRepair:
         :return: 修复后的图像
         """
         if mask is None:
-            # 交互式绘制掩码
             self.original_image = image.copy()
             self.final_mask = None
             self.current_mask = None
-            
+            self.text_regions = []
+            repaired = None
+            repaired_done = False
+            editing_text_regions = False
+
             cv2.namedWindow(self.window_name)
             cv2.setMouseCallback(self.window_name, self.mouse_callback)
-            
+
             print("使用鼠标左键绘制要修复的区域，按'r'键完成修复，按'q'键退出")
             print("按'+'键增加画笔大小，按'-'键减小画笔大小")
             print("按'c'键清除所有绘制区域")
-            
+            print("按'a'键添加/调整文本区域")
+            print("按't'键补全文字")
+
             while True:
-                self.update_display()
-                key = cv2.waitKey(1) & 0xFF
-                
-                if key == ord('r'):  # 按'r'键完成修复
-                    break
-                elif key == ord('q'):  # 按'q'键退出
-                    cv2.destroyAllWindows()
-                    return None
-                elif key == ord('+'):  # 增加画笔大小
-                    self.brush_size = min(50, self.brush_size + 2)
-                    print(f"画笔大小: {self.brush_size}")
-                elif key == ord('-'):  # 减小画笔大小
-                    self.brush_size = max(2, self.brush_size - 2)
-                    print(f"画笔大小: {self.brush_size}")
-                elif key == ord('c'):  # 清除所有绘制区域
-                    self.final_mask = None
-                    self.current_mask = None
-                    print("已清除所有绘制区域")
+                if repaired_done:
+                    temp = repaired.copy()
+                    # 显示所有文本区域
+                    for region in self.text_regions:
+                        x, y, w, h = region
+                        cv2.rectangle(temp, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    # 实时显示正在调整的文本区域
+                    if self.adjusting_text and self.text_region_start is not None:
+                        x, y = self.text_region_start
+                        cv2.rectangle(temp, (x, y), (self.last_x, self.last_y), (255, 0, 0), 2)
+                    cv2.imshow(self.window_name, temp)
+                else:
                     self.update_display()
-                
-            mask = self.final_mask
-            cv2.destroyAllWindows()
+
+                key = cv2.waitKey(1) & 0xFF
+
+                if not repaired_done:
+                    if key == ord('r'):
+                        repaired = cv2.inpaint(self.original_image, self.final_mask, 3, cv2.INPAINT_TELEA)
+                        repaired_done = True
+                        print("修复完成！可继续按'a'添加/调整文本区域，按't'补全文字，按'q'退出")
+                    elif key == ord('q'):
+                        cv2.destroyAllWindows()
+                        return None
+                    elif key == ord('+'):
+                        self.brush_size = min(50, self.brush_size + 2)
+                        print(f"画笔大小: {self.brush_size}")
+                    elif key == ord('-'):
+                        self.brush_size = max(2, self.brush_size - 2)
+                        print(f"画笔大小: {self.brush_size}")
+                    elif key == ord('c'):
+                        self.final_mask = None
+                        self.current_mask = None
+                        self.text_regions = []
+                        print("已清除所有绘制区域")
+                        self.update_display()
+                else:
+                    if key == ord('a'):
+                        print("请用鼠标左键拖动选择文本区域，松开后区域会高亮显示。可多次添加。")
+                        editing_text_regions = True
+                        self.adjusting_text = True  # 新增，允许实时显示边框
+                        cv2.setMouseCallback(self.window_name, self.mouse_callback)
+                    elif key == ord('t'):
+                        if self.text_regions:
+                            text = input("请输入要补全的文字：")
+                            repaired = self.complete_text(repaired, text)
+                            print("已补全文字，可继续添加文本区域或补全文字，按q退出")
+                        else:
+                            print("未检测到文本区域，请先按a添加")
+                    elif key == ord('q'):
+                        cv2.destroyAllWindows()
+                        return repaired
 
         # 使用INPAINT_TELEA算法进行修复
         repaired = cv2.inpaint(image, mask, 3, cv2.INPAINT_TELEA)
         return repaired
 
-    def add_text(self, image, text, position, font_scale=1.0, color=(0, 0, 0), thickness=2):
+    def complete_text(self, image, text):
         """
-        在图像上添加文字
+        补全文字
         :param image: 输入图像
-        :param text: 要添加的文字
-        :param position: 文字位置 (x, y)
-        :param font_scale: 字体大小
-        :param color: 文字颜色
-        :param thickness: 文字粗细
-        :return: 添加文字后的图像
+        :param text: 要补全的文字
+        :return: 补全后的图像
         """
+        if not self.text_regions:
+            return image
+
         result = image.copy()
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(result, text, position, font, font_scale, color, thickness)
+        for region in self.text_regions:
+            result = self.text_completion.complete_text(result, region, text)
+
         return result
 
-    def repair_and_complete(self, image_path, text=None, text_position=None):
-        """
-        修复图像并补全文字
-        :param image_path: 图像路径
-        :param text: 要补全的文字
-        :param text_position: 文字位置
-        :return: 修复并补全后的图像
-        """
-        # 读取图像
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"无法读取图像: {image_path}")
-            return None
+def main():
+    # 测试代码
+    repair = ImageRepair()
+    
+    # 读取图像
+    image = cv2.imread('example1.png')
+    if image is None:
+        print("无法读取图像")
+        return
 
-        # 修复图像
-        repaired = self.repair_image(image)
-        if repaired is None:
-            return None
+    # 修复图像
+    repaired = repair.repair_image(image)
+    if repaired is not None:
+        cv2.imshow('Repaired Image', repaired)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
 
-        # 如果提供了文字和位置，则添加文字
-        if text is not None and text_position is not None:
-            repaired = self.add_text(repaired, text, text_position)
-
-        return repaired
+if __name__ == "__main__":
+    main()

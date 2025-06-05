@@ -7,7 +7,7 @@ from ImageRepair import ImageRepair
 
 def main():
     # 读取图像
-    ima_path = '/Users/weishixiong/Downloads/StitpProject/example2.jpg'
+    ima_path = '/Users/weishixiong/Downloads/StitpProject/example1.jpg'
     img = cv2.imread(ima_path)
 
     if img is None:
